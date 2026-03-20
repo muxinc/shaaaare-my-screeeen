@@ -1,0 +1,16 @@
+.build/
+dist/
+release/
+.swiftpm/
+*.xcodeproj
+xcuserdata/
+DerivedData/
+.DS_Store
+.claude/
+*.cer
+*.p12
+*.p8
+*.mobileprovision
+*.dmg
+*.pkg
+*.zip

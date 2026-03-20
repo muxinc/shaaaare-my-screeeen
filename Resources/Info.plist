@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>ShaaaareMyScreeeen</string>
+    <key>CFBundleDisplayName</key>
+    <string>Shaaaare My Screeeen</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.mux.shaaaare-my-screeeen</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleExecutable</key>
+    <string>ShaaaareMyScreeeen</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+    <key>NSCameraUsageDescription</key>
+    <string>Camera access for webcam overlay in recordings</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Microphone access to record audio narration</string>
+    <key>NSCameraUseContinuityCameraDeviceType</key>
+    <true/>
+</dict>
+</plist>
