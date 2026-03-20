@@ -122,15 +122,18 @@ codesign --force \
 codesign --verify --strict --verbose=2 "$APP_BUNDLE"
 spctl -a -vv -t execute "$APP_BUNDLE" || true
 
+ditto -c -k --keepParent "$APP_BUNDLE" "$ZIP_PATH"
+
 if (( SHOULD_NOTARIZE )); then
-    xcrun notarytool submit "$APP_BUNDLE" \
+    xcrun notarytool submit "$ZIP_PATH" \
         --keychain-profile "$NOTARY_PROFILE" \
         --wait
 
     xcrun stapler staple "$APP_BUNDLE"
-fi
 
-ditto -c -k --keepParent "$APP_BUNDLE" "$ZIP_PATH"
+    rm -f "$ZIP_PATH"
+    ditto -c -k --keepParent "$APP_BUNDLE" "$ZIP_PATH"
+fi
 
 echo "Built release artifact:"
 echo "  $APP_BUNDLE"
