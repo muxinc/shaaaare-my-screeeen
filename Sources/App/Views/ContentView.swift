@@ -27,6 +27,8 @@ struct ContentView: View {
                     UploadProgressView(progress: progress)
                 case .done(let url):
                     DoneView(playbackURL: url)
+                case .library:
+                    LibraryView()
                 }
             }
             .animation(.easeInOut(duration: 0.2), value: appState.screen)

@@ -54,19 +54,31 @@ struct SourcePickerView: View {
     var body: some View {
         VStack(spacing: 0) {
             // Header
-            HStack {
+            HStack(spacing: 10) {
                 Text("Record")
                     .font(MuxTheme.display(size: 28))
                 Spacer()
-                Button(action: { appState.screen = .settings }) {
-                    Image(systemName: "gear")
-                        .font(.system(size: 18, weight: .medium))
+                Button(action: { appState.screen = .library }) {
+                    Image(systemName: "film.stack")
+                        .font(.system(size: 16, weight: .medium))
                         .foregroundColor(MuxTheme.textSecondary)
                         .frame(width: 32, height: 32)
                         .background(MuxTheme.backgroundSecondary)
                         .clipShape(Circle())
                 }
                 .buttonStyle(.plain)
+                .help("Library")
+
+                Button(action: { appState.screen = .settings }) {
+                    Image(systemName: "gear")
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundColor(MuxTheme.textSecondary)
+                        .frame(width: 32, height: 32)
+                        .background(MuxTheme.backgroundSecondary)
+                        .clipShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .help("Settings")
             }
             .padding(.horizontal, 24)
             .padding(.top, 24)

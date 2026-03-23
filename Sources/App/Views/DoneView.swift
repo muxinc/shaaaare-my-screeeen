@@ -54,15 +54,27 @@ struct DoneView: View {
 
             Spacer()
 
-            Button(action: {
-                appState.screen = .sourcePicker
-            }) {
-                HStack(spacing: 8) {
-                    Image(systemName: "record.circle")
-                    Text("Record Another")
+            VStack(spacing: 12) {
+                Button(action: {
+                    appState.screen = .sourcePicker
+                }) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "record.circle")
+                        Text("Record Another")
+                    }
                 }
+                .buttonStyle(MuxPrimaryButtonStyle())
+
+                Button(action: {
+                    appState.screen = .library
+                }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "film.stack")
+                        Text("View Library")
+                    }
+                }
+                .buttonStyle(MuxTextButtonStyle())
             }
-            .buttonStyle(MuxPrimaryButtonStyle())
             .padding(.horizontal, 32)
             .padding(.bottom, 32)
         }

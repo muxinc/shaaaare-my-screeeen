@@ -12,6 +12,7 @@ enum AppScreen: Equatable {
     case review(URL)
     case uploading(Double)
     case done(String)
+    case library
 
     static func == (lhs: AppScreen, rhs: AppScreen) -> Bool {
         switch (lhs, rhs) {
@@ -23,6 +24,7 @@ enum AppScreen: Equatable {
         case (.review(let a), .review(let b)): return a == b
         case (.uploading(let a), .uploading(let b)): return a == b
         case (.done(let a), .done(let b)): return a == b
+        case (.library, .library): return true
         default: return false
         }
     }
@@ -64,6 +66,7 @@ class AppState: ObservableObject {
     let screenRecorder = ScreenRecorder()
     let credentialStore = CredentialStore()
     let preferencesStore = PreferencesStore()
+    let historyStore = RecordingHistoryStore()
 
     init() {
         if ProcessInfo.processInfo.arguments.contains("--probe-camera-auth") {
@@ -339,7 +342,14 @@ class AppState: ObservableObject {
                 try? FileManager.default.removeItem(at: fileURL)
             }
 
-            screen = .done("https://player.mux.com/\(playbackId)")
+            let playbackURL = "https://player.mux.com/\(playbackId)"
+            historyStore.append(RecordingEntry(
+                assetId: assetId,
+                playbackId: playbackId,
+                playbackURL: playbackURL
+            ))
+
+            screen = .done(playbackURL)
         } catch {
             self.error = "Upload failed: \(error.localizedDescription)"
             screen = .review(fileURL)
