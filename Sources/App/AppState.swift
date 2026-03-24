@@ -229,11 +229,8 @@ class AppState: ObservableObject {
             )
             screen = .recording
 
-            // Store reference to main window before hiding it
-            if let window = NSApplication.shared.mainWindow {
-                self.mainWindow = window
-                window.orderOut(nil)
-            }
+            // Hide the panel during recording
+            mainWindow?.orderOut(nil)
 
             StopControlWindow.shared.show(appState: self)
             // Camera overlay is already showing from preview if camera is selected
@@ -251,12 +248,9 @@ class AppState: ObservableObject {
 
             screen = .review(fileURL)
 
-            // Show the main window after setting the screen so it renders the review
-            if let window = mainWindow {
-                window.makeKeyAndOrderFront(nil)
-                NSApplication.shared.activate(ignoringOtherApps: true)
-                self.mainWindow = nil
-            }
+            // Show the panel after recording
+            mainWindow?.makeKeyAndOrderFront(nil)
+            NSApplication.shared.activate(ignoringOtherApps: true)
         } catch {
             self.error = "Failed to stop recording: \(error.localizedDescription)"
             StopControlWindow.shared.close()
@@ -264,11 +258,8 @@ class AppState: ObservableObject {
 
             screen = .sourcePicker
 
-            if let window = mainWindow {
-                window.makeKeyAndOrderFront(nil)
-                NSApplication.shared.activate(ignoringOtherApps: true)
-                self.mainWindow = nil
-            }
+            mainWindow?.makeKeyAndOrderFront(nil)
+            NSApplication.shared.activate(ignoringOtherApps: true)
         }
     }
 
@@ -343,16 +334,88 @@ class AppState: ObservableObject {
             }
 
             let playbackURL = "https://player.mux.com/\(playbackId)"
-            historyStore.append(RecordingEntry(
+            let entry = RecordingEntry(
                 assetId: assetId,
                 playbackId: playbackId,
                 playbackURL: playbackURL
-            ))
+            )
+            historyStore.append(entry)
 
             screen = .done(playbackURL)
+
+            // Kick off Robots summarization in the background
+            Task {
+                await summarizeRecording(entryId: entry.id, assetId: assetId, api: api)
+            }
         } catch {
             self.error = "Upload failed: \(error.localizedDescription)"
             screen = .review(fileURL)
+        }
+    }
+
+    private func summarizeRecording(entryId: UUID, assetId: String, api: MuxAPI) async {
+        do {
+            // Wait for auto-generated captions to be ready — Robots produces
+            // better summaries when it has the transcript available.
+            appLog("[Robots] Waiting for text tracks on asset \(assetId)...")
+            var captionsReady = false
+            for _ in 0..<120 {
+                try await Task.sleep(for: .seconds(3))
+                let asset = try await api.getAsset(id: assetId)
+                let textTracks = asset.tracks?.filter { $0.type == "text" } ?? []
+                if textTracks.contains(where: { $0.status == "ready" }) {
+                    captionsReady = true
+                    break
+                }
+                // If all text tracks errored, no point waiting
+                if !textTracks.isEmpty && textTracks.allSatisfy({ $0.status == "errored" }) {
+                    appLog("[Robots] Text tracks errored, proceeding without captions")
+                    break
+                }
+            }
+            if captionsReady {
+                appLog("[Robots] Captions ready, submitting summarize job")
+            } else {
+                appLog("[Robots] Captions not ready after timeout, submitting summarize job anyway")
+            }
+
+            let job = try await api.createSummarizeJob(assetId: assetId)
+            appLog("[Robots] Created summarize job \(job.id) for asset \(assetId)")
+
+            // Poll for completion
+            var result: RobotsJob?
+            for _ in 0..<60 {
+                try await Task.sleep(for: .seconds(3))
+                let status = try await api.getSummarizeJob(jobId: job.id)
+                if status.status == "completed" {
+                    result = status
+                    break
+                } else if status.status == "errored" {
+                    let msg = status.errors?.first?.message ?? "unknown"
+                    appLog("[Robots] Summarize job errored: \(msg)")
+                    break
+                }
+            }
+
+            if let outputs = result?.outputs {
+                appLog("[Robots] Summarize complete: \(outputs.title ?? "no title")")
+                historyStore.update(id: entryId) { entry in
+                    entry.title = outputs.title
+                    entry.summary = outputs.description
+                    entry.tags = outputs.tags
+                    entry.summarizing = false
+                }
+            } else {
+                historyStore.update(id: entryId) { entry in
+                    entry.summarizing = false
+                }
+            }
+        } catch {
+            // Robots API may not be available on this account — fail silently
+            appLog("[Robots] Summarize failed (may not be enabled): \(error.localizedDescription)")
+            historyStore.update(id: entryId) { entry in
+                entry.summarizing = false
+            }
         }
     }
 

@@ -26,7 +26,14 @@ class MuxAPI {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
         let body = MuxCreateUploadRequest(
-            newAssetSettings: NewAssetSettings(playbackPolicy: ["public"]),
+            newAssetSettings: NewAssetSettings(
+                playbackPolicy: ["public"],
+                inputs: [
+                    AssetInput(generatedSubtitles: [
+                        GeneratedSubtitle(languageCode: "en", name: "English CC")
+                    ])
+                ]
+            ),
             corsOrigin: nil
         )
         request.httpBody = try JSONEncoder().encode(body)
@@ -82,7 +89,47 @@ class MuxAPI {
         let (data, _) = try await session.data(for: request)
         let response = try JSONDecoder().decode(MuxAssetResponse.self, from: data)
 
-        return AssetStatus(status: response.data.status, playbackIds: response.data.playbackIds)
+        return AssetStatus(status: response.data.status, playbackIds: response.data.playbackIds, tracks: response.data.tracks)
+    }
+    // MARK: - Robots API
+
+    func createSummarizeJob(assetId: String, tone: String = "neutral") async throws -> RobotsJob {
+        let url = URL(string: "\(baseURL)/robots/v1/jobs/summarize")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue(authHeader(), forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        let body = RobotsJobRequest(parameters: RobotsSummarizeParameters(assetId: assetId, tone: tone))
+        request.httpBody = try JSONEncoder().encode(body)
+
+        let (data, response) = try await session.data(for: request)
+        let httpResponse = response as? HTTPURLResponse
+
+        guard let statusCode = httpResponse?.statusCode, (200...299).contains(statusCode) else {
+            let statusCode = httpResponse?.statusCode ?? 0
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw MuxAPIError.requestFailed(statusCode: statusCode, body: body)
+        }
+
+        return try JSONDecoder().decode(RobotsJobResponse.self, from: data).data
+    }
+
+    func getSummarizeJob(jobId: String) async throws -> RobotsJob {
+        let url = URL(string: "\(baseURL)/robots/v1/jobs/summarize/\(jobId)")!
+        var request = URLRequest(url: url)
+        request.setValue(authHeader(), forHTTPHeaderField: "Authorization")
+
+        let (data, response) = try await session.data(for: request)
+        let httpResponse = response as? HTTPURLResponse
+
+        guard let statusCode = httpResponse?.statusCode, (200...299).contains(statusCode) else {
+            let statusCode = httpResponse?.statusCode ?? 0
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw MuxAPIError.requestFailed(statusCode: statusCode, body: body)
+        }
+
+        return try JSONDecoder().decode(RobotsJobResponse.self, from: data).data
     }
 }
 
