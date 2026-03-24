@@ -28,7 +28,7 @@ struct ContentView: View {
                 case .done(let url):
                     DoneView(playbackURL: url)
                 case .library:
-                    LibraryView()
+                    LibraryView(historyStore: appState.historyStore)
                 }
             }
             .animation(.easeInOut(duration: 0.2), value: appState.screen)

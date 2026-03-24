@@ -7,8 +7,18 @@ struct RecordingEntry: Codable, Identifiable {
     let playbackURL: String
     let createdAt: Date
 
+    // Robots API summary (populated async after upload)
+    var title: String?
+    var summary: String?
+    var tags: [String]?
+    var summarizing: Bool?
+
     var thumbnailURL: URL? {
         URL(string: "https://image.mux.com/\(playbackId)/thumbnail.jpg?width=320&height=180&fit_mode=smartcrop")
+    }
+
+    var displayTitle: String {
+        title ?? assetId
     }
 
     init(assetId: String, playbackId: String, playbackURL: String) {
@@ -17,10 +27,13 @@ struct RecordingEntry: Codable, Identifiable {
         self.playbackId = playbackId
         self.playbackURL = playbackURL
         self.createdAt = Date()
+        self.summarizing = true
     }
 }
 
-class RecordingHistoryStore {
+@MainActor
+class RecordingHistoryStore: ObservableObject {
+    @Published var entries: [RecordingEntry] = []
     private let fileURL: URL
 
     init() {
@@ -28,28 +41,42 @@ class RecordingHistoryStore {
         let appDir = appSupport.appendingPathComponent("com.mux.shaaaare-my-screeeen")
         try? FileManager.default.createDirectory(at: appDir, withIntermediateDirectories: true)
         fileURL = appDir.appendingPathComponent("history.json")
+        entries = loadFromDisk()
     }
 
     func load() -> [RecordingEntry] {
+        entries
+    }
+
+    func reload() {
+        entries = loadFromDisk()
+    }
+
+    func append(_ entry: RecordingEntry) {
+        entries.insert(entry, at: 0)
+        saveToDisk()
+    }
+
+    func update(id: UUID, transform: (inout RecordingEntry) -> Void) {
+        if let index = entries.firstIndex(where: { $0.id == id }) {
+            transform(&entries[index])
+            saveToDisk()
+        }
+    }
+
+    func delete(id: UUID) {
+        entries.removeAll { $0.id == id }
+        saveToDisk()
+    }
+
+    private func loadFromDisk() -> [RecordingEntry] {
         guard let data = try? Data(contentsOf: fileURL) else { return [] }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         return (try? decoder.decode([RecordingEntry].self, from: data)) ?? []
     }
 
-    func append(_ entry: RecordingEntry) {
-        var entries = load()
-        entries.insert(entry, at: 0)
-        save(entries)
-    }
-
-    func delete(id: UUID) {
-        var entries = load()
-        entries.removeAll { $0.id == id }
-        save(entries)
-    }
-
-    private func save(_ entries: [RecordingEntry]) {
+    private func saveToDisk() {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = .prettyPrinted
