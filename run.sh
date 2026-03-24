@@ -136,11 +136,13 @@ while [[ $# -gt 0 ]]; do
 done
 
 swift build
+swift build --product shaaaare-mcp
 
 rm -rf "$APP_BUNDLE"
 mkdir -p "$MACOS" "$RESOURCES"
 
 cp "$SOURCE_BUILD_DIR/$APP_NAME" "$MACOS/$APP_NAME"
+cp "$SOURCE_BUILD_DIR/shaaaare-mcp" "$MACOS/shaaaare-mcp"
 cp "$INFO_PLIST" "$CONTENTS/Info.plist"
 
 if [[ -d "Resources/AppIcon.appiconset" ]]; then

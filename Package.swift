@@ -9,6 +9,10 @@ let package = Package(
             name: "ShaaaareMyScreeeen",
             path: "Sources/App",
             resources: [.process("../../Resources")]
+        ),
+        .executableTarget(
+            name: "shaaaare-mcp",
+            path: "Sources/MCP"
         )
     ]
 )
