@@ -1,8 +1,19 @@
 import SwiftUI
 
+@MainActor
+class AppDelegate: NSObject, NSApplicationDelegate {
+    var menuBarController: MenuBarController!
+    let appState = AppState()
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        menuBarController = MenuBarController(appState: appState)
+        menuBarController.showPanel()
+    }
+}
+
 @main
 struct ShaaaareMyScreeenApp: App {
-    @StateObject private var appState = AppState()
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
     init() {
         AppLogger.shared.bootstrap()
@@ -10,13 +21,8 @@ struct ShaaaareMyScreeenApp: App {
     }
 
     var body: some Scene {
-        WindowGroup {
-            ContentView()
-                .environmentObject(appState)
-                .frame(minWidth: 420, minHeight: 500)
-                .tint(MuxTheme.orange)
+        Settings {
+            EmptyView()
         }
-        .windowStyle(.hiddenTitleBar)
-        .windowResizability(.contentMinSize)
     }
 }
