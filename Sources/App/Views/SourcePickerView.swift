@@ -343,14 +343,23 @@ struct SourcePickerView: View {
                     Task { await appState.startRecording() }
                 }) {
                     HStack(spacing: 8) {
-                        Circle()
-                            .fill(Color.white)
-                            .frame(width: 10, height: 10)
-                        Text("Start Recording")
+                        if appState.isStartingRecording {
+                            ProgressView()
+                                .controlSize(.small)
+                                .scaleEffect(0.8)
+                        } else {
+                            Circle()
+                                .fill(Color.white)
+                                .frame(width: 10, height: 10)
+                        }
+                        Text(appState.isStartingRecording ? "Preparing…" : "Start Recording")
                     }
                 }
                 .buttonStyle(MuxPrimaryButtonStyle(isDestructive: true))
-                .disabled(appState.selectedDisplay == nil && appState.selectedWindow == nil)
+                .disabled(
+                    appState.isStartingRecording ||
+                    (appState.selectedDisplay == nil && appState.selectedWindow == nil)
+                )
                 .padding(24)
             }
         }

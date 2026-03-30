@@ -28,5 +28,9 @@
     <true/>
     <key>LSUIElement</key>
     <true/>
+    <key>SUFeedURL</key>
+    <string>https://muxinc.github.io/shaaaare-my-screeeen/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>om7jRB2g/wqlSO7RsnSHxvllxumpb3by71ghxEaY7J4=</string>
 </dict>
 </plist>

@@ -116,20 +116,46 @@ class ScreenRecorder: NSObject, ObservableObject {
         throw RecordingError.noSourceSelected
     }
 
+    private static let maxWidth = 3840
+    private static let maxHeight = 2160
+
     private func makeStreamConfiguration(
         display: SCDisplay?,
         window: SCWindow?,
         captureSystemAudio: Bool
     ) -> SCStreamConfiguration {
         let config = SCStreamConfiguration()
+        var rawWidth = 1920
+        var rawHeight = 1080
+
         if let display {
-            config.width = Int(display.width) * 2
-            config.height = Int(display.height) * 2
+            rawWidth = Int(display.width) * 2
+            rawHeight = Int(display.height) * 2
         } else if let window {
-            config.width = Int(window.frame.width) * 2
-            config.height = Int(window.frame.height) * 2
+            rawWidth = Int(window.frame.width) * 2
+            rawHeight = Int(window.frame.height) * 2
         }
+
+        // Clamp to 4K UHD
+        let scale = min(
+            Double(Self.maxWidth) / Double(rawWidth),
+            Double(Self.maxHeight) / Double(rawHeight),
+            1.0
+        )
+        // Round DOWN to multiples of 16.  Hardware video encoders (H.264 & HEVC)
+        // allocate internal buffers at 16-pixel-aligned dimensions.  Non-aligned
+        // sizes like 2114 cause kCMSampleBufferError_ArrayTooSmall (-12737).
+        config.width = Int(Double(rawWidth) * scale) & ~15
+        config.height = Int(Double(rawHeight) * scale) & ~15
+
+        appLog("[ScreenRecorder] Resolution: raw=\(rawWidth)x\(rawHeight), aligned=\(config.width)x\(config.height)")
+        if scale < 1.0 {
+            appLog("[ScreenRecorder] Clamped resolution (scale=\(scale))")
+        }
+
         config.showsCursor = true
+        config.minimumFrameInterval = CMTime(value: 1, timescale: 60)
+        config.queueDepth = 5
         config.capturesAudio = captureSystemAudio
         config.sampleRate = 48000
         config.channelCount = 2
@@ -176,6 +202,16 @@ private class StreamOutput: NSObject, SCStreamOutput {
 
         switch type {
         case .screen:
+            // Only forward frames with new screen content.
+            // SCK delivers .idle frames at 60fps when nothing changes on screen;
+            // these carry no pixel buffer and cause "Failed to render frame" spam.
+            // The fill timer handles keeping the video alive between complete frames.
+            guard let attachmentsArray = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[String: Any]],
+                  let attachments = attachmentsArray.first,
+                  let statusRawValue = attachments[SCStreamFrameInfo.status.rawValue] as? Int,
+                  statusRawValue == SCFrameStatus.complete.rawValue else {
+                return
+            }
             screenFrameCount += 1
             if screenFrameCount <= 3 {
                 appLog("[StreamOutput] Screen frame #\(screenFrameCount) delivered")
@@ -257,15 +293,16 @@ private final class CaptureWarmup: NSObject, SCStreamOutput, SCStreamDelegate {
         self.continuation = nil
         lock.unlock()
 
+        // Must await stream stop before resuming so the old stream is fully
+        // torn down before the real recording stream starts.
         Task {
             try? await stream.stopCapture()
-        }
-
-        switch result {
-        case .success:
-            continuation.resume()
-        case .failure(let error):
-            continuation.resume(throwing: error)
+            switch result {
+            case .success:
+                continuation.resume()
+            case .failure(let error):
+                continuation.resume(throwing: error)
+            }
         }
     }
 }

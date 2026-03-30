@@ -153,16 +153,40 @@ if [[ -d "$SOURCE_BUILD_DIR/${APP_NAME}_${APP_NAME}.bundle" ]]; then
     cp -r "$SOURCE_BUILD_DIR/${APP_NAME}_${APP_NAME}.bundle" "$RESOURCES/"
 fi
 
+# Embed Sparkle.framework
+FRAMEWORKS="$CONTENTS/Frameworks"
+mkdir -p "$FRAMEWORKS"
+SPARKLE_FW="$SOURCE_BUILD_DIR/Sparkle.framework"
+if [[ -d "$SPARKLE_FW" ]]; then
+    cp -R "$SPARKLE_FW" "$FRAMEWORKS/"
+    install_name_tool -add_rpath "@executable_path/../Frameworks" "$MACOS/$APP_NAME" 2>/dev/null || true
+fi
+
 SIGN_IDENTITY="$(resolve_sign_identity || true)"
 if [[ -n "$SIGN_IDENTITY" ]]; then
     SIGN_ARGS=(--force --sign "$SIGN_IDENTITY")
     if [[ "$SIGN_IDENTITY" == Developer\ ID\ Application:* ]]; then
         SIGN_ARGS+=(--options runtime --timestamp)
     fi
-    if [[ -f "$ENTITLEMENTS" ]]; then
-        SIGN_ARGS+=(--entitlements "$ENTITLEMENTS")
+
+    # Sign Sparkle framework components (inner to outer)
+    if [[ -d "$FRAMEWORKS/Sparkle.framework" ]]; then
+        for component in "$FRAMEWORKS/Sparkle.framework/Versions/B/XPCServices/"*.xpc \
+                         "$FRAMEWORKS/Sparkle.framework/Versions/B/Updater.app"; do
+            [[ -e "$component" ]] && codesign "${SIGN_ARGS[@]}" "$component"
+        done
+        codesign "${SIGN_ARGS[@]}" "$FRAMEWORKS/Sparkle.framework"
     fi
-    codesign "${SIGN_ARGS[@]}" "$APP_BUNDLE"
+
+    # Sign MCP binary
+    codesign "${SIGN_ARGS[@]}" "$MACOS/shaaaare-mcp"
+
+    # Sign the app bundle (with entitlements)
+    if [[ -f "$ENTITLEMENTS" ]]; then
+        codesign "${SIGN_ARGS[@]}" --entitlements "$ENTITLEMENTS" "$APP_BUNDLE"
+    else
+        codesign "${SIGN_ARGS[@]}" "$APP_BUNDLE"
+    fi
     echo "Signed with: $SIGN_IDENTITY"
 else
     codesign --force --sign - "$APP_BUNDLE"

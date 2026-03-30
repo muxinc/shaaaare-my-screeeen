@@ -12,18 +12,19 @@ class RecordingSession: @unchecked Sendable {
 
     private var assetWriter: AVAssetWriter?
     private var videoInput: AVAssetWriterInput?
-    private var audioInput: AVAssetWriterInput?
+    private var systemAudioInput: AVAssetWriterInput?
+    private var micAudioInput: AVAssetWriterInput?
     private var pixelBufferAdaptor: AVAssetWriterInputPixelBufferAdaptor?
 
     private var hasStartedSession = false
     private var sessionStartTime: CMTime?
     private let writingQueue = DispatchQueue(label: "com.mux.recording-session")
     private var frameCount = 0
-    private var audioBufferCount = 0
-    private var micBufferCount = 0
-    private var audioDropCount = 0
+    private var systemAudioBufferCount = 0
+    private var micAudioBufferCount = 0
     private var writerFailed = false
-    private var lastAudioPTS: CMTime = .invalid
+    private var lastSystemAudioPTS: CMTime = .invalid
+    private var lastMicAudioPTS: CMTime = .invalid
 
     private var micSession: AVCaptureSession?
     private var micOutput: AVCaptureAudioDataOutput?
@@ -38,6 +39,7 @@ class RecordingSession: @unchecked Sendable {
     // Fill timer: re-composites camera onto last screen frame when no new
     // screen frames arrive (window capture only delivers on content change)
     private var lastScreenPixelBuffer: CVPixelBuffer?
+    private var lastRenderedFrame: CVPixelBuffer?
     private var lastWrittenTimestamp: CMTime = .invalid
     private var fillTimer: DispatchSourceTimer?
 
@@ -52,14 +54,15 @@ class RecordingSession: @unchecked Sendable {
     func start() throws {
         let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mov)
 
+        // HEVC handles high resolutions (3600x2114+) without the macroblock-rate
+        // limits that cause H.264 to fail with -12737 at >Level 5.1 rates.
         let videoSettings: [String: Any] = [
-            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoCodecKey: AVVideoCodecType.hevc,
             AVVideoWidthKey: width,
             AVVideoHeightKey: height,
             AVVideoCompressionPropertiesKey: [
-                AVVideoAverageBitRateKey: width * height * 6,
-                AVVideoExpectedSourceFrameRateKey: 60,
-                AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel
+                AVVideoAverageBitRateKey: width * height * 4,
+                AVVideoExpectedSourceFrameRateKey: 60
             ]
         ]
 
@@ -73,29 +76,24 @@ class RecordingSession: @unchecked Sendable {
             sourcePixelBufferAttributes: [
                 kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
                 kCVPixelBufferWidthKey as String: width,
-                kCVPixelBufferHeightKey as String: height
+                kCVPixelBufferHeightKey as String: height,
+                kCVPixelBufferIOSurfacePropertiesKey as String: [:] as [String: Any]
             ]
         )
         self.pixelBufferAdaptor = adaptor
 
-        // Single audio track for all audio sources (system + mic).
-        // Multiple audio tracks in MOV cause compatibility issues with some
-        // services (e.g. Mux only picks up the first track). Both sources
-        // write to the same input with timestamp ordering enforced.
-        if captureSystemAudio || captureMicrophone {
-            let audioSettings: [String: Any] = [
-                AVFormatIDKey: kAudioFormatMPEG4AAC,
-                AVSampleRateKey: 48000,
-                AVNumberOfChannelsKey: 2,
-                AVEncoderBitRateKey: 128000
-            ]
-            let aInput = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
-            aInput.expectsMediaDataInRealTime = true
-            writer.add(aInput)
-            self.audioInput = aInput
+        // Separate audio inputs for system audio (stereo) and mic (mono).
+        // Sharing a single input caused two problems:
+        //   1. Mono mic data fed into a stereo encoder → high-pitch playback
+        //   2. Mic timestamps ran ahead of system audio → all system audio dropped
+        if captureSystemAudio {
+            self.systemAudioInput = Self.makeAudioInput(channels: 2, writer: writer)
+        }
+        if captureMicrophone {
+            self.micAudioInput = Self.makeAudioInput(channels: 1, writer: writer)
         }
 
-        appLog("[Recording] Writer configured: \(width)x\(height), systemAudio=\(captureSystemAudio), mic=\(captureMicrophone), output: \(outputURL.lastPathComponent)")
+        appLog("[Recording] Writer configured: HEVC \(width)x\(height), bitrate=\(width * height * 4), systemAudio=\(captureSystemAudio), mic=\(captureMicrophone), output: \(outputURL.lastPathComponent)")
 
         guard writer.startWriting() else {
             throw RecordingError.writingFailed(writer.error?.localizedDescription ?? "Unknown error")
@@ -126,22 +124,27 @@ class RecordingSession: @unchecked Sendable {
         guard writer.status == .writing else { return }
         guard let videoInput, videoInput.isReadyForMoreMediaData else { return }
 
-        let timestamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        let rawTimestamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
 
         if !hasStartedSession {
-            writer.startSession(atSourceTime: timestamp)
-            sessionStartTime = timestamp
+            // Start at the raw capture timestamp so we never need to retime
+            // sample buffers. Retiming audio via CMSampleBufferCreateCopyWithNewTiming
+            // with sampleTimingEntryCount:1 was producing malformed buffers that
+            // crashed the encoder with -12737 (kCMSampleBufferError_ArrayTooSmall).
+            writer.startSession(atSourceTime: rawTimestamp)
+            sessionStartTime = rawTimestamp
             hasStartedSession = true
-            appLog("[Recording] Session started at \(timestamp.seconds)s")
+            appLog("[Recording] Session started at raw PTS: \(rawTimestamp.seconds)s")
         }
+
+        guard sessionStartTime != nil else { return }
 
         frameCount += 1
         if frameCount <= 5 || frameCount % 60 == 0 {
-            appLog("[Recording] Frame #\(frameCount) at \(timestamp.seconds)s, writer status: \(writer.status.rawValue)")
+            appLog("[Recording] Frame #\(frameCount) PTS=\(rawTimestamp.seconds)s, writer status: \(writer.status.rawValue)")
         }
 
         if frameCount <= 5 {
-            // Log the format of the first few raw screen frames for debugging.
             if let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer) {
                 let mediaType = CMFormatDescriptionGetMediaType(formatDesc)
                 let dims = CMVideoFormatDescriptionGetDimensions(formatDesc)
@@ -165,7 +168,7 @@ class RecordingSession: @unchecked Sendable {
         }
 
         // Ensure monotonically increasing timestamps (fill frames may have advanced the clock)
-        var writeTimestamp = timestamp
+        var writeTimestamp = rawTimestamp
         if lastWrittenTimestamp.isValid && CMTimeCompare(writeTimestamp, lastWrittenTimestamp) <= 0 {
             writeTimestamp = CMTimeAdd(lastWrittenTimestamp, CMTime(value: 1, timescale: 600))
         }
@@ -173,8 +176,12 @@ class RecordingSession: @unchecked Sendable {
         let ok = adaptor.append(renderedFrame, withPresentationTime: writeTimestamp)
         if ok {
             lastWrittenTimestamp = writeTimestamp
+            lastRenderedFrame = renderedFrame
+            if frameCount <= 5 {
+                appLog("[Recording] Video frame #\(frameCount) appended OK, writerStatus=\(writer.status.rawValue)")
+            }
         } else {
-            appLog("[Recording] Failed to append rendered frame #\(frameCount), writer status: \(writer.status.rawValue), error: \(describe(writer.error) ?? "none")")
+            appLog("[Recording] !! VIDEO APPEND FAILED frame #\(frameCount) PTS=\(writeTimestamp.seconds)s, writer status: \(writer.status.rawValue), error: \(describe(writer.error) ?? "none")")
         }
     }
 
@@ -195,56 +202,82 @@ class RecordingSession: @unchecked Sendable {
 
     func appendSystemAudioBuffer(_ sampleBuffer: CMSampleBuffer) {
         writingQueue.async { [weak self] in
-            self?._appendAudioBuffer(sampleBuffer, source: "system")
+            guard let self else { return }
+            let isFirst = self.systemAudioBufferCount == 0
+            if let newPTS = self._appendAudio(sampleBuffer, to: self.systemAudioInput, lastPTS: self.lastSystemAudioPTS, source: "system", isFirst: isFirst) {
+                self.lastSystemAudioPTS = newPTS
+                self.systemAudioBufferCount += 1
+            }
         }
     }
 
     func appendMicAudioBuffer(_ sampleBuffer: CMSampleBuffer) {
         writingQueue.async { [weak self] in
-            self?._appendAudioBuffer(sampleBuffer, source: "mic")
+            guard let self else { return }
+            let isFirst = self.micAudioBufferCount == 0
+            if let newPTS = self._appendAudio(sampleBuffer, to: self.micAudioInput, lastPTS: self.lastMicAudioPTS, source: "mic", isFirst: isFirst) {
+                self.lastMicAudioPTS = newPTS
+                self.micAudioBufferCount += 1
+            }
         }
     }
 
-    /// Appends audio from any source to the single shared audio track.
-    /// Enforces monotonically increasing timestamps; out-of-order buffers are dropped.
-    private func _appendAudioBuffer(_ sampleBuffer: CMSampleBuffer, source: String) {
-        guard let writer = assetWriter, writer.status == .writing else { return }
-        guard let audioInput, audioInput.isReadyForMoreMediaData else { return }
-        guard hasStartedSession else { return }
+    /// Shared audio append logic. Each source writes to its own AVAssetWriterInput
+    /// with independent timestamp tracking. Returns the raw PTS on success.
+    ///
+    /// We append the original sample buffer without retiming. The session starts
+    /// at the first video frame's raw PTS, so audio buffers are already in the
+    /// correct time base. Previously we used CMSampleBufferCreateCopyWithNewTiming
+    /// with sampleTimingEntryCount:1 which produced malformed multi-sample audio
+    /// buffers and crashed the encoder with -12737.
+    private func _appendAudio(
+        _ sampleBuffer: CMSampleBuffer,
+        to input: AVAssetWriterInput?,
+        lastPTS: CMTime,
+        source: String,
+        isFirst: Bool
+    ) -> CMTime? {
+        guard let writer = assetWriter, writer.status == .writing else { return nil }
+        guard let input, input.isReadyForMoreMediaData else { return nil }
+        guard hasStartedSession, let startTime = sessionStartTime else { return nil }
 
-        let isFirstForSource = (source == "system" && audioBufferCount == 0) || (source == "mic" && micBufferCount == 0)
-        if isFirstForSource {
+        let rawPTS = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        let numSamples = CMSampleBufferGetNumSamples(sampleBuffer)
+
+        if isFirst {
             if let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer) {
                 let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc)?.pointee
-                appLog("[Recording] \(source) audio format: sampleRate=\(asbd?.mSampleRate ?? 0), channels=\(asbd?.mChannelsPerFrame ?? 0), bitsPerChannel=\(asbd?.mBitsPerChannel ?? 0)")
+                appLog("[Recording] \(source) audio format: formatID=\(asbd?.mFormatID ?? 0), flags=\(asbd?.mFormatFlags ?? 0), sampleRate=\(asbd?.mSampleRate ?? 0), channels=\(asbd?.mChannelsPerFrame ?? 0), bitsPerChannel=\(asbd?.mBitsPerChannel ?? 0), numSamples=\(numSamples)")
             }
         }
 
-        // Enforce monotonically increasing timestamps for the shared audio track
-        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-        if lastAudioPTS.isValid && CMTimeCompare(pts, lastAudioPTS) <= 0 {
-            audioDropCount += 1
-            if audioDropCount <= 5 {
-                appLog("[Recording] Dropped out-of-order \(source) audio buffer (pts=\(pts.seconds)s <= last=\(lastAudioPTS.seconds)s)")
+        // Drop audio that arrived before the video session started.
+        if CMTimeCompare(rawPTS, startTime) < 0 {
+            if isFirst {
+                appLog("[Recording] Dropping pre-session \(source) audio: PTS=\(rawPTS.seconds)s < start=\(startTime.seconds)s")
             }
-            return
+            return nil
         }
 
-        let ok = audioInput.append(sampleBuffer)
-        if ok {
-            lastAudioPTS = pts
-            if source == "system" {
-                audioBufferCount += 1
-            } else {
-                micBufferCount += 1
-            }
-        } else if (audioBufferCount + micBufferCount) == 0 {
-            appLog("[Recording] Failed to append first \(source) audio buffer, writer status: \(writer.status.rawValue), error: \(describe(writer.error) ?? "none")")
+        if lastPTS.isValid && CMTimeCompare(rawPTS, lastPTS) <= 0 {
+            return nil
         }
+
+        // Append the original buffer directly — no retiming needed since the
+        // session started at the raw capture timestamp.
+        if input.append(sampleBuffer) {
+            if isFirst || writer.status != .writing {
+                appLog("[Recording] \(source) audio appended OK, writerStatus=\(writer.status.rawValue)")
+            }
+            return rawPTS
+        } else {
+            appLog("[Recording] !! AUDIO APPEND FAILED \(source) PTS=\(rawPTS.seconds)s numSamples=\(numSamples), writer status: \(writer.status.rawValue), error: \(describe(writer.error) ?? "none")")
+        }
+        return nil
     }
 
     func stop() async throws -> URL {
-        appLog("[Recording] Stopping — \(frameCount) video frames, \(audioBufferCount) system audio buffers, \(micBufferCount) mic audio buffers, \(audioDropCount) dropped out-of-order audio buffers")
+        appLog("[Recording] Stopping — \(frameCount) video frames, \(systemAudioBufferCount) system audio, \(micAudioBufferCount) mic audio")
 
         stopFillTimer()
 
@@ -274,14 +307,36 @@ class RecordingSession: @unchecked Sendable {
         // Drain the writing queue before finishing, so all pending frames are flushed
         let url: URL = try await withCheckedThrowingContinuation { continuation in
             writingQueue.async {
+                // Duplicate the last frame at the wall-clock stop time so the
+                // video duration matches the actual recording length.
+                if let lastFrame = self.lastRenderedFrame,
+                   let adaptor = self.pixelBufferAdaptor,
+                   let videoInput = self.videoInput, videoInput.isReadyForMoreMediaData {
+                    // Raw timestamps are host-clock based, so CMClockGetHostTimeClock
+                    // gives a directly comparable value.
+                    let finalPTS = CMClockGetTime(CMClockGetHostTimeClock())
+                    if self.lastWrittenTimestamp.isValid && CMTimeCompare(finalPTS, self.lastWrittenTimestamp) > 0 {
+                        let ok = adaptor.append(lastFrame, withPresentationTime: finalPTS)
+                        if ok {
+                            appLog("[Recording] Appended final frame at \(finalPTS.seconds)s for correct duration")
+                        }
+                    }
+                }
+
                 self.videoInput?.markAsFinished()
-                self.audioInput?.markAsFinished()
+                self.systemAudioInput?.markAsFinished()
+                self.micAudioInput?.markAsFinished()
 
                 writer.finishWriting {
                     let fileExists = FileManager.default.fileExists(atPath: self.outputURL.path)
                     let fileSize = (try? FileManager.default.attributesOfItem(atPath: self.outputURL.path)[.size] as? NSNumber)?.intValue ?? 0
                     appLog("[Recording] Writer finished with status: \(writer.status.rawValue), error: \(self.describe(writer.error) ?? "none"), fileExists: \(fileExists), fileSize: \(fileSize)")
                     if writer.status == .completed {
+                        continuation.resume(returning: self.outputURL)
+                    } else if fileExists && fileSize > 1024 {
+                        // The file may still be usable even if finishWriting reports an error.
+                        // Some encoder errors (-12737 etc.) leave a valid partial MOV.
+                        appLog("[Recording] Writer did not complete cleanly but file exists (\(fileSize) bytes) — returning partial recording")
                         continuation.resume(returning: self.outputURL)
                     } else {
                         continuation.resume(throwing: RecordingError.writingFailed(
@@ -324,6 +379,38 @@ class RecordingSession: @unchecked Sendable {
         }
     }
 
+    // MARK: - Audio Input Factory
+
+    private static func makeAudioInput(channels: Int, writer: AVAssetWriter) -> AVAssetWriterInput {
+        var channelLayout = AudioChannelLayout(
+            mChannelLayoutTag: channels == 1 ? kAudioChannelLayoutTag_Mono : kAudioChannelLayoutTag_Stereo,
+            mChannelBitmap: AudioChannelBitmap(rawValue: 0),
+            mNumberChannelDescriptions: 0,
+            mChannelDescriptions: AudioChannelDescription(
+                mChannelLabel: kAudioChannelLabel_Unknown,
+                mChannelFlags: AudioChannelFlags(rawValue: 0),
+                mCoordinates: (0, 0, 0)
+            )
+        )
+        let channelLayoutData = Data(
+            bytes: &channelLayout,
+            count: MemoryLayout<AudioChannelLayout>.size
+        )
+
+        let audioSettings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatMPEG4AAC,
+            AVSampleRateKey: 48000,
+            AVNumberOfChannelsKey: channels,
+            AVEncoderBitRateKey: channels == 1 ? 64000 : 128000,
+            AVChannelLayoutKey: channelLayoutData
+        ]
+
+        let input = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
+        input.expectsMediaDataInRealTime = true
+        writer.add(input)
+        return input
+    }
+
     // MARK: - Camera Fill Timer
 
     private func startFillTimer() {
@@ -343,6 +430,8 @@ class RecordingSession: @unchecked Sendable {
         fillTimer = nil
     }
 
+    private var fillFrameCount = 0
+
     /// When screen frames are infrequent (window capture), re-composite the last
     /// screen content with the current camera frame to keep the overlay smooth.
     private func fillCameraFrame() {
@@ -351,6 +440,7 @@ class RecordingSession: @unchecked Sendable {
         guard let videoInput, videoInput.isReadyForMoreMediaData else { return }
         guard let adaptor = pixelBufferAdaptor else { return }
         guard let screenPB = lastScreenPixelBuffer else { return }
+        guard lastWrittenTimestamp.isValid else { return }
 
         // Only fill when we have a camera
         cameraLock.lock()
@@ -358,11 +448,9 @@ class RecordingSession: @unchecked Sendable {
         cameraLock.unlock()
         guard hasCam else { return }
 
-        // Only fill if enough time has passed since the last written frame
-        let now = CMClockGetTime(CMClockGetHostTimeClock())
-        guard lastWrittenTimestamp.isValid else { return }
-        let elapsed = CMTimeSubtract(now, lastWrittenTimestamp).seconds
-        guard elapsed >= 0.04 else { return }
+        // Advance from the last written timestamp by one frame interval.
+        let frameInterval = CMTime(value: 1, timescale: 24)
+        let fillTimestamp = CMTimeAdd(lastWrittenTimestamp, frameInterval)
 
         // Build fill frame: last screen content + current camera
         var outputImage = CIImage(cvPixelBuffer: screenPB)
@@ -377,15 +465,16 @@ class RecordingSession: @unchecked Sendable {
 
         guard let rendered = renderToPixelBuffer(outputImage) else { return }
 
-        // Ensure monotonicity
-        let fillTimestamp = CMTimeMaximum(
-            now,
-            CMTimeAdd(lastWrittenTimestamp, CMTime(value: 1, timescale: 600))
-        )
-
+        fillFrameCount += 1
         let ok = adaptor.append(rendered, withPresentationTime: fillTimestamp)
         if ok {
             lastWrittenTimestamp = fillTimestamp
+            lastRenderedFrame = rendered
+            if fillFrameCount <= 3 {
+                appLog("[Recording] Fill frame #\(fillFrameCount) PTS=\(fillTimestamp.seconds)s")
+            }
+        } else {
+            appLog("[Recording] !! FILL FRAME APPEND FAILED #\(fillFrameCount) PTS=\(fillTimestamp.seconds)s, writer status: \(writer.status.rawValue), error: \(describe(writer.error) ?? "none")")
         }
     }
 
@@ -396,16 +485,18 @@ class RecordingSession: @unchecked Sendable {
             return nil
         }
 
-        var outputImage = CIImage(cvPixelBuffer: screenPixelBuffer)
-
         cameraLock.lock()
         let cameraBuffer = lastCameraBuffer
         cameraLock.unlock()
 
-        if let cameraBuffer, let cameraImage = makeCameraOverlayImage(cameraBuffer: cameraBuffer) {
-            outputImage = cameraImage.composited(over: outputImage)
+        // Fast path: no camera → use the original SCK pixel buffer directly.
+        // This avoids an unnecessary CIContext GPU copy and ensures the encoder
+        // receives a pixel buffer with the exact properties SCK provides.
+        guard let cameraBuffer, let cameraImage = makeCameraOverlayImage(cameraBuffer: cameraBuffer) else {
+            return screenPixelBuffer
         }
 
+        let outputImage = cameraImage.composited(over: CIImage(cvPixelBuffer: screenPixelBuffer))
         return renderToPixelBuffer(outputImage)
     }
 
@@ -461,14 +552,26 @@ class RecordingSession: @unchecked Sendable {
     }
 
     private func renderToPixelBuffer(_ image: CIImage) -> CVPixelBuffer? {
+        // Prefer the adaptor's pixel buffer pool for efficient, encoder-compatible buffers
         var outputBuffer: CVPixelBuffer?
-        CVPixelBufferCreate(
-            kCFAllocatorDefault,
-            width, height,
-            kCVPixelFormatType_32BGRA,
-            [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary,
-            &outputBuffer
-        )
+
+        if let pool = pixelBufferAdaptor?.pixelBufferPool {
+            let status = CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &outputBuffer)
+            if status != kCVReturnSuccess {
+                appLog("[Recording] Pool buffer allocation failed (\(status)), falling back to manual")
+                outputBuffer = nil
+            }
+        }
+
+        if outputBuffer == nil {
+            CVPixelBufferCreate(
+                kCFAllocatorDefault,
+                width, height,
+                kCVPixelFormatType_32BGRA,
+                [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary,
+                &outputBuffer
+            )
+        }
 
         guard let output = outputBuffer else { return nil }
         ciContext.render(image, to: output)

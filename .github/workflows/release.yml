@@ -1,0 +1,145 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: macos-15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app
+
+      - name: Import signing certificate
+        env:
+          P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          P12_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          echo "$P12_BASE64" | base64 --decode > cert.p12
+          KEYCHAIN_PATH=$RUNNER_TEMP/build.keychain
+          security create-keychain -p "" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "" "$KEYCHAIN_PATH"
+          security import cert.p12 -k "$KEYCHAIN_PATH" -P "$P12_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain
+          rm cert.p12
+
+      - name: Store notarization credentials
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          xcrun notarytool store-credentials "ShaaaareMyScreeeenNotary" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD"
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+          echo "version=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Update version in Info.plist
+        run: |
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${{ steps.version.outputs.version }}" Resources/Info.plist
+          BUILD_NUMBER=$(date +%s)
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" Resources/Info.plist
+
+      - name: Resolve dependencies
+        run: swift package resolve
+
+      - name: Import Sparkle EdDSA key
+        env:
+          SPARKLE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          echo "$SPARKLE_KEY" > /tmp/sparkle_key.txt
+          .build/artifacts/sparkle/Sparkle/bin/generate_keys -f /tmp/sparkle_key.txt
+          rm /tmp/sparkle_key.txt
+
+      - name: Build, sign, and notarize
+        run: ./release.sh --notarize --notary-profile ShaaaareMyScreeeenNotary
+
+      - name: Generate Sparkle signature
+        id: sparkle
+        run: |
+          SIGN_UPDATE=".build/artifacts/sparkle/Sparkle/bin/sign_update"
+          SIG_OUTPUT=$("$SIGN_UPDATE" release/ShaaaareMyScreeeen-macOS.zip 2>&1)
+          ED_SIG=$(echo "$SIG_OUTPUT" | grep -o 'sparkle:edSignature="[^"]*"' | cut -d'"' -f2)
+          LENGTH=$(stat -f%z release/ShaaaareMyScreeeen-macOS.zip)
+          echo "signature=$ED_SIG" >> "$GITHUB_OUTPUT"
+          echo "length=$LENGTH" >> "$GITHUB_OUTPUT"
+
+      - name: Build appcast.xml
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          ED_SIG: ${{ steps.sparkle.outputs.signature }}
+          LENGTH: ${{ steps.sparkle.outputs.length }}
+        run: |
+          BUILD=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" Resources/Info.plist)
+          PUB_DATE=$(date -R)
+          DOWNLOAD_URL="https://github.com/muxinc/shaaaare-my-screeeen/releases/download/v${VERSION}/ShaaaareMyScreeeen-macOS.zip"
+
+          NEW_ITEM="<item>
+                <title>Version ${VERSION}</title>
+                <sparkle:version>${BUILD}</sparkle:version>
+                <sparkle:shortVersionString>${VERSION}</sparkle:shortVersionString>
+                <pubDate>${PUB_DATE}</pubDate>
+                <enclosure
+                    url=\"${DOWNLOAD_URL}\"
+                    sparkle:edSignature=\"${ED_SIG}\"
+                    length=\"${LENGTH}\"
+                    type=\"application/octet-stream\"
+                />
+                <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            </item>"
+
+          # Fetch existing appcast from gh-pages if it exists
+          APPCAST_URL="https://raw.githubusercontent.com/muxinc/shaaaare-my-screeeen/gh-pages/appcast.xml"
+          if curl -fsSL "$APPCAST_URL" -o /tmp/appcast.xml 2>/dev/null; then
+            # Insert new item before closing </channel>
+            awk -v item="$NEW_ITEM" '/<\/channel>/ { print item } { print }' /tmp/appcast.xml > release/appcast.xml
+          else
+            cat > release/appcast.xml <<EOF
+          <?xml version="1.0" encoding="utf-8"?>
+          <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+              <channel>
+                  <title>Shaaaare My Screeeen</title>
+                  ${NEW_ITEM}
+              </channel>
+          </rss>
+          EOF
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/ShaaaareMyScreeeen-macOS.zip
+          generate_release_notes: true
+
+      - name: Deploy appcast to GitHub Pages
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin gh-pages 2>/dev/null || true
+
+          if git rev-parse --verify origin/gh-pages >/dev/null 2>&1; then
+            git worktree add /tmp/gh-pages origin/gh-pages
+          else
+            git worktree add --orphan /tmp/gh-pages
+            cd /tmp/gh-pages && git checkout --orphan gh-pages && cd -
+          fi
+
+          cp release/appcast.xml /tmp/gh-pages/appcast.xml
+          cd /tmp/gh-pages
+          git add appcast.xml
+          git commit -m "Update appcast for v${{ steps.version.outputs.version }}" || true
+          git push origin gh-pages

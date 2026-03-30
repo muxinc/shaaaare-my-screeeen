@@ -1,14 +1,17 @@
 import SwiftUI
 import AppKit
+import Sparkle
 
 @MainActor
 class MenuBarController: NSObject, ObservableObject {
     private var statusItem: NSStatusItem!
     private var panel: NSPanel!
     private var appState: AppState
+    private let updater: SPUUpdater
 
-    init(appState: AppState) {
+    init(appState: AppState, updater: SPUUpdater) {
         self.appState = appState
+        self.updater = updater
         super.init()
         setupStatusItem()
         setupPanel()
@@ -33,10 +36,14 @@ class MenuBarController: NSObject, ObservableObject {
         let settings = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
         settings.target = self
 
+        let checkForUpdates = NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: "")
+        checkForUpdates.target = self
+
         menu.addItem(newRecording)
         menu.addItem(library)
         menu.addItem(NSMenuItem.separator())
         menu.addItem(settings)
+        menu.addItem(checkForUpdates)
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit Shaaaare My Screeeen", action: #selector(quitApp), keyEquivalent: "q"))
 
@@ -59,6 +66,10 @@ class MenuBarController: NSObject, ObservableObject {
     @objc private func openSettings() {
         appState.screen = .settings
         showPanel()
+    }
+
+    @objc private func checkForUpdates() {
+        updater.checkForUpdates()
     }
 
     @objc private func quitApp() {

@@ -62,6 +62,7 @@ class AppState: ObservableObject {
     @Published var error: String?
     @Published var needsScreenRecordingPermission: Bool = false
     @Published var pendingReviewURL: URL?
+    @Published var isStartingRecording: Bool = false
     var mainWindow: NSWindow?
     let screenRecorder = ScreenRecorder()
     let credentialStore = CredentialStore()
@@ -185,6 +186,10 @@ class AppState: ObservableObject {
     }
 
     func startRecording() async {
+        guard !isStartingRecording else { return }
+        isStartingRecording = true
+        defer { isStartingRecording = false }
+
         let hasScreenPermission = await PermissionManager.checkScreenRecordingPermission()
         if !hasScreenPermission {
             let granted = await PermissionManager.requestScreenRecordingPermission()
