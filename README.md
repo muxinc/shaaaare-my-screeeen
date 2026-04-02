@@ -16,6 +16,7 @@ Built with Swift, SwiftUI, ScreenCaptureKit, and AVFoundation. No Electron, no w
 - AI-powered video summaries via Mux Robots API
 - Recording library with thumbnails, summaries, and tags
 - MCP server for Claude Code integration
+- Auto-updates via Sparkle
 - Menu bar app — stays out of your way
 
 ## Requirements
@@ -140,15 +141,45 @@ All configuration is stored locally on your machine:
 | Recording history | `~/Library/Application Support/com.mux.shaaaare-my-screeeen/history.json` |
 | App logs | `~/Library/Logs/ShaaaareMyScreeeen/app.log` |
 
-## Distributing Builds
+## Releasing
 
-To share a signed build with non-developers:
+The app uses [Sparkle](https://sparkle-project.org) for auto-updates. Users get notified of new versions and can update in-app.
+
+### Publishing a new release
 
 ```bash
-./release.sh --skip-notarize
+./bump.sh          # 1.0.0 → 1.0.1 (patch)
+git push origin main --tags
 ```
 
-For the full distribution flow including notarization and stapling, see [RELEASING.md](RELEASING.md).
+That's it. GitHub Actions builds, signs, notarizes, and publishes the release. The appcast is updated automatically so existing users see the update.
+
+For minor or major bumps:
+
+```bash
+./bump.sh minor    # 1.0.1 → 1.1.0
+./bump.sh major    # 1.1.0 → 2.0.0
+```
+
+### What happens on push
+
+1. GitHub Actions builds a release binary
+2. Signs it with the Developer ID certificate
+3. Submits to Apple for notarization and staples the ticket
+4. Signs the zip with Sparkle's EdDSA key
+5. Creates a GitHub Release with the zip attached
+6. Updates the [appcast](https://muxinc.github.io/shaaaare-my-screeeen/appcast.xml) on GitHub Pages
+
+### Local release builds
+
+To build a signed release locally without CI:
+
+```bash
+./release.sh --skip-notarize                                    # Signed only
+./release.sh --notarize --notary-profile ShaaaareMyScreeeenNotary  # Signed + notarized
+```
+
+Output goes to `release/ShaaaareMyScreeeen-macOS.zip`.
 
 ## License
 
